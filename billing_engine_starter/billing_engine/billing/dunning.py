@@ -3,11 +3,11 @@ Dunning — payment retry logic.
 """
 
 from datetime import date, timedelta
-from typing import Optional
+from dataclasses import dataclass
 from enum import Enum
 
 from billing_engine.payments.gateway import PaymentGateway
-from billing_engine.models import Invoice, LedgerDirection, LedgerEntry, InvoiceStatus
+from billing_engine.models import Invoice, LedgerDirection, LedgerEntry, InvoiceStatus, SubscriptionStatus
 
 
 RETRY_DELAYS_DAYS = [1, 3, 7]
@@ -15,10 +15,15 @@ MAX_ATTEMPTS = 3
 
 
 class DunningState(str, Enum):
-    PENDING = "PENDING"
-    RETRY = "RETRY"
+    RETRYING = "RETRYING"
+    SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
-    RECOVERED = "RECOVERED"
+
+
+@dataclass
+class DunningOutcome:
+    state: DunningState
+    next_retry_at: Optional[date] = None
 
 
 class DunningProcess:
@@ -36,18 +41,15 @@ class DunningProcess:
         self.subscription_repo = subscription_repo
         self.attempt_repo = attempt_repo
 
-    def attempt(self, invoice: Invoice, customer_id: int, today: date) -> DunningState:
-        """Attempt to charge the invoice. Returns the new state."""
-        # Record attempt number
+    def attempt(self, invoice: Invoice, customer_id: int, today: date) -> DunningOutcome:
+        """Attempt to charge the invoice. Returns an outcome with state."""
         attempts = self.attempt_repo.count_for_invoice(invoice.id)
         attempt_no = attempts + 1
 
         result = self.gateway.charge(invoice.id, int(invoice.total.amount * 100), invoice.total.currency)
 
         if result.success:
-            # Payment succeeded
             self.invoice_repo.mark_paid(invoice.id)
-            # Credit ledger
             entry = LedgerEntry(
                 id=None,
                 invoice_id=invoice.id,
@@ -58,28 +60,23 @@ class DunningProcess:
                 created_at=None,
             )
             self.ledger_repo.add(entry)
-            # Record attempt
             self.attempt_repo.add(invoice.id, attempt_no, "SUCCESS", None, None)
-            return DunningState.RECOVERED
+            return DunningOutcome(state=DunningState.SUCCEEDED)
         else:
-            # Record failure
             next_retry = today + timedelta(days=RETRY_DELAYS_DAYS[min(attempt_no-1, len(RETRY_DELAYS_DAYS)-1)])
             self.attempt_repo.add(invoice.id, attempt_no, "FAILED", result.failure_reason, next_retry)
 
             if attempt_no >= MAX_ATTEMPTS:
-                # Mark invoice as failed and subscription as past due
                 self.invoice_repo.mark_failed(invoice.id)
-                # Get subscription id from invoice
                 self.subscription_repo.update_status(
                     invoice.subscription_id,
-                    status=SubscriptionStatus.PAST_DUE,
+                    SubscriptionStatus.PAST_DUE,
                     past_due_since=today,
                 )
-                return DunningState.FAILED
+                return DunningOutcome(state=DunningState.FAILED)
             else:
-                return DunningState.RETRY
+                return DunningOutcome(state=DunningState.RETRYING, next_retry_at=next_retry)
 
     @staticmethod
     def should_cancel(past_due_since: date, today: date, grace_days: int = 7) -> bool:
-        """Return True if the subscription should be canceled after grace period."""
         return (today - past_due_since).days >= grace_days
