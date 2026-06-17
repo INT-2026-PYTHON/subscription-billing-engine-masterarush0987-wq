@@ -4,7 +4,7 @@ BillingCycle — orchestrates billing for all due subscriptions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Optional, Callable
 
@@ -18,16 +18,14 @@ from billing_engine.db.repository import (
     LedgerRepository,
     PaymentAttemptRepository,
     UsageRecordRepository,
-    DiscountRepository,
-    PlanTierRepository,
 )
 from billing_engine.models import (
     SubscriptionStatus,
     InvoiceStatus,
     LedgerDirection,
+    LedgerEntry,
     Invoice,
     Plan,
-    Subscription,
 )
 from billing_engine.billing.pipeline import build_invoice
 from billing_engine.pricing import FlatRate
@@ -37,8 +35,10 @@ from billing_engine.payments.gateway import PaymentGateway, ScriptedGateway
 
 @dataclass
 class BillingResult:
-    subscriptions_billed: int
-    invoices_created: int
+    subscriptions_billed: int = 0
+    invoices_created: int = 0
+    invoices_skipped_duplicate: int = 0
+    trials_activated: int = 0
 
 
 class BillingCycle:
@@ -72,13 +72,14 @@ class BillingCycle:
 
     def run(self, as_of: date) -> BillingResult:
         subs = self.subscription_repo.get_due_for_billing(as_of)
-        billed = 0
-        invoices_created = 0
+        result = BillingResult()
 
         for sub in subs:
+            # Handle trial expiration
             if sub.status == SubscriptionStatus.TRIAL and sub.trial_end and sub.trial_end <= as_of:
                 self.subscription_repo.update_status(sub.id, SubscriptionStatus.ACTIVE)
                 sub.status = SubscriptionStatus.ACTIVE
+                result.trials_activated += 1
 
             if sub.status != SubscriptionStatus.ACTIVE:
                 continue
@@ -100,8 +101,16 @@ class BillingCycle:
 
             strategy = self.strategy_factory(plan)
             discount = None  # simplify for now
-            tax_calc = self.tax_factory()
-            tax_context = self.tax_factory()  # not exactly; but tests use no tax
+            tax_calc = self.tax_factory(customer)   # <-- pass customer here
+            tax_context = self.tax_factory(customer) # but we need context; we'll use a simple one
+
+            # Actually we need a TaxContext; we'll build one from customer.
+            from billing_engine.taxes.base import TaxContext
+            tax_context = TaxContext(
+                customer_country=customer.country_code,
+                customer_state=customer.state_code or "",
+                seller_state="MH",
+            )
 
             invoice_count = self.invoice_repo.count_for_subscription(sub.id)
 
@@ -143,7 +152,7 @@ class BillingCycle:
             new_end = new_start + timedelta(days=30)
             self.subscription_repo.update_period(sub.id, new_start, new_end)
 
-            billed += 1
-            invoices_created += 1
+            result.subscriptions_billed += 1
+            result.invoices_created += 1
 
-        return BillingResult(subscriptions_billed=billed, invoices_created=invoices_created)
+        return result
