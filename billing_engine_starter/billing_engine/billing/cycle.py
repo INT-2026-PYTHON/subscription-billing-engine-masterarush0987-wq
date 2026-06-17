@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+import calendar
+import sqlite3
 from typing import Optional, Callable
 
 from billing_engine.db.database import Database
@@ -31,6 +33,13 @@ from billing_engine.billing.pipeline import build_invoice
 from billing_engine.pricing import FlatRate
 from billing_engine.money import Money
 from billing_engine.payments.gateway import PaymentGateway, ScriptedGateway
+
+
+def add_months(d: date, months: int = 1) -> date:
+    year = d.year + (d.month + months - 1) // 12
+    month = (d.month + months - 1) % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 @dataclass
@@ -73,15 +82,15 @@ class BillingCycle:
     def run(self, as_of: date) -> BillingResult:
         result = BillingResult()
 
-        # Process all subscriptions: activate trials, bill due actives
         all_subs = self.subscription_repo.list_all()
 
         for sub in all_subs:
             # Handle trial expiration
             if sub.status == SubscriptionStatus.TRIAL and sub.trial_end and sub.trial_end <= as_of:
                 self.subscription_repo.update_status(sub.id, SubscriptionStatus.ACTIVE)
-                sub.status = SubscriptionStatus.ACTIVE
                 result.trials_activated += 1
+                # Re‑fetch subscription to get updated status
+                sub = self.subscription_repo.get(sub.id)
 
             if sub.status != SubscriptionStatus.ACTIVE:
                 continue
@@ -98,7 +107,6 @@ class BillingCycle:
             if not customer:
                 continue
 
-            # usage quantity
             usage_quantity = 0
             if plan.pricing_type.value in ("USAGE", "TIERED", "FREEMIUM"):
                 usage_quantity = self.usage_repo.sum_for_period(
@@ -106,8 +114,7 @@ class BillingCycle:
                 )
 
             strategy = self.strategy_factory(plan)
-            discount = None  # simplify for now
-            # tax_factory returns (tax_calc, tax_context)
+            discount = None
             tax_calc, tax_context = self.tax_factory(customer)
 
             invoice_count = self.invoice_repo.count_for_subscription(sub.id)
@@ -125,7 +132,13 @@ class BillingCycle:
                 invoice_count_so_far=invoice_count,
             )
 
-            saved = self.invoice_repo.add(invoice)
+            # Try to save invoice; skip if duplicate
+            try:
+                saved = self.invoice_repo.add(invoice)
+            except sqlite3.IntegrityError:
+                result.invoices_skipped_duplicate += 1
+                continue
+
             for li in saved.line_items:
                 self.line_item_repo.add(li)
 
@@ -145,9 +158,9 @@ class BillingCycle:
             with self.db.connect() as conn:
                 conn.execute("UPDATE invoices SET status = 'ISSUED' WHERE id = ?", (saved.id,))
 
-            # advance period
+            # advance period to next month (same day)
             new_start = sub.current_period_end
-            new_end = new_start + timedelta(days=30)
+            new_end = add_months(new_start, 1)  # one month later
             self.subscription_repo.update_period(sub.id, new_start, new_end)
 
             result.subscriptions_billed += 1
