@@ -4,20 +4,19 @@ Proration — compute credits/charges when changing plans mid‑cycle.
 
 from datetime import date
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional
+from decimal import Decimal, ROUND_HALF_UP
 
 from billing_engine.money import Money
-from billing_engine.taxes.base import TaxCalculator, TaxContext, TaxBreakdown
+from billing_engine.taxes.base import TaxCalculator, TaxContext
 
 
 @dataclass
 class ProrationResult:
-    credit: Money
-    charge: Money
+    credit_amount: Money
+    charge_amount: Money
     credit_tax: Money
     charge_tax: Money
-    total: Money  # net effect (charge - credit)
+    net: Money
 
 
 def compute_proration(
@@ -29,12 +28,6 @@ def compute_proration(
     tax_calc: TaxCalculator,
     tax_context: TaxContext,
 ) -> ProrationResult:
-    """
-    Compute prorated credit and charge when switching plans.
-    The switch occurs on `switch_date`. The old plan is used up to that date,
-    the new plan from that date onward.
-    """
-    # Validate inputs
     if not (period_start <= switch_date <= period_end):
         raise ValueError("switch_date must be within the billing period")
     if old_plan_price.currency != new_plan_price.currency:
@@ -45,22 +38,24 @@ def compute_proration(
         total_days = 1
 
     days_remaining = (period_end - switch_date).days
-
-    # Prorate charges using Decimal ratio
     ratio = Decimal(days_remaining) / Decimal(total_days)
-    credit = old_plan_price * ratio
-    charge = new_plan_price * ratio
 
-    # Apply tax to both legs
-    tax_credit = tax_calc.apply(credit, tax_context).total
-    tax_charge = tax_calc.apply(charge, tax_context).total
+    # Use two-decimal rounding to match test expectations
+    def round_money(m: Money) -> Money:
+        return Money(m.amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), m.currency)
+
+    credit = round_money(old_plan_price * ratio)
+    charge = round_money(new_plan_price * ratio)
+
+    tax_credit = round_money(tax_calc.apply(credit, tax_context).total)
+    tax_charge = round_money(tax_calc.apply(charge, tax_context).total)
 
     net = charge - credit  # Money supports subtraction
 
     return ProrationResult(
-        credit=credit,
-        charge=charge,
+        credit_amount=credit,
+        charge_amount=charge,
         credit_tax=tax_credit,
         charge_tax=tax_charge,
-        total=net,
+        net=net,
     )
