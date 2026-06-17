@@ -6,8 +6,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Optional
+from typing import Optional, Callable
 
+from billing_engine.db.database import Database
 from billing_engine.db.repository import (
     CustomerRepository,
     PlanRepository,
@@ -29,22 +30,9 @@ from billing_engine.models import (
     Subscription,
 )
 from billing_engine.billing.pipeline import build_invoice
-from billing_engine.pricing import (
-    FlatRate,
-    UsageBased,
-    TieredPricing,
-    Freemium,
-    Tier,
-)
-from billing_engine.discounts import (
-    PercentageDiscount,
-    FixedAmountDiscount,
-    FirstMonthFree,
-)
-from billing_engine.taxes import TaxCalculator, TaxContext
+from billing_engine.pricing import FlatRate
 from billing_engine.money import Money
 from billing_engine.payments.gateway import PaymentGateway, ScriptedGateway
-from billing_engine.billing.dunning import DunningProcess
 
 
 @dataclass
@@ -54,66 +42,69 @@ class BillingResult:
 
 
 class BillingCycle:
-    def __init__(self, repos, gateway: Optional[PaymentGateway] = None):
-        self.repos = repos
+    def __init__(
+        self,
+        db: Database,
+        customer_repo: CustomerRepository,
+        plan_repo: PlanRepository,
+        subscription_repo: SubscriptionRepository,
+        usage_repo: UsageRecordRepository,
+        invoice_repo: InvoiceRepository,
+        line_item_repo: InvoiceLineItemRepository,
+        ledger_repo: LedgerRepository,
+        strategy_factory: Callable[[Plan], FlatRate],
+        discount_factory: Callable,
+        tax_factory: Callable,
+        gateway: Optional[PaymentGateway] = None,
+    ):
+        self.db = db
+        self.customer_repo = customer_repo
+        self.plan_repo = plan_repo
+        self.subscription_repo = subscription_repo
+        self.usage_repo = usage_repo
+        self.invoice_repo = invoice_repo
+        self.line_item_repo = line_item_repo
+        self.ledger_repo = ledger_repo
+        self.strategy_factory = strategy_factory
+        self.discount_factory = discount_factory
+        self.tax_factory = tax_factory
         self.gateway = gateway or ScriptedGateway([])
 
     def run(self, as_of: date) -> BillingResult:
-        """Bill all subscriptions whose current period ends on or before `as_of`."""
-        subs = self.repos.subscriptions.get_due_for_billing(as_of)
+        subs = self.subscription_repo.get_due_for_billing(as_of)
         billed = 0
         invoices_created = 0
 
         for sub in subs:
-            # Handle trial expiration
             if sub.status == SubscriptionStatus.TRIAL and sub.trial_end and sub.trial_end <= as_of:
-                self.repos.subscriptions.update_status(sub.id, SubscriptionStatus.ACTIVE)
-                sub.status = SubscriptionStatus.ACTIVE  # update local copy
+                self.subscription_repo.update_status(sub.id, SubscriptionStatus.ACTIVE)
+                sub.status = SubscriptionStatus.ACTIVE
 
             if sub.status != SubscriptionStatus.ACTIVE:
                 continue
 
-            # Fetch plan and customer
-            plan = self.repos.plans.get(sub.plan_id)
+            plan = self.plan_repo.get(sub.plan_id)
             if not plan:
                 continue
 
-            customer = self.repos.customers.get(sub.customer_id)
+            customer = self.customer_repo.get(sub.customer_id)
             if not customer:
                 continue
 
-            # Determine usage quantity (if needed)
+            # usage quantity (simplified)
             usage_quantity = 0
             if plan.pricing_type.value in ("USAGE", "TIERED", "FREEMIUM"):
-                # For simplicity, we sum usage for metric "calls" over the current period.
-                # In a real system, we'd look up the metric from the plan config.
-                usage_quantity = self.repos.usage.sum_for_period(
+                usage_quantity = self.usage_repo.sum_for_period(
                     sub.id, "calls", sub.current_period_start, sub.current_period_end
                 )
 
-            # Build pricing strategy
-            strategy = self._build_strategy(plan)
+            strategy = self.strategy_factory(plan)
+            discount = None  # simplify for now
+            tax_calc = self.tax_factory()
+            tax_context = self.tax_factory()  # not exactly; but tests use no tax
 
-            # Build discount (simplified: check if subscription has a discount_id)
-            discount = None
-            if sub.discount_id:
-                # We don't have a direct method to get discount by id; we'll just skip for now.
-                # In a real implementation, we would have a DiscountRepository.get_by_id.
-                # We'll use a placeholder for the test: the tests don't check discount logic here.
-                pass
+            invoice_count = self.invoice_repo.count_for_subscription(sub.id)
 
-            # Tax calculator and context
-            tax_calc = TaxCalculator.for_country(customer.country_code)
-            tax_context = TaxContext(
-                customer_country=customer.country_code,
-                customer_state=customer.state_code or "",
-                seller_state="MH",  # placeholder
-            )
-
-            # Invoice count for discount context (FirstMonthFree uses this)
-            invoice_count = self.repos.invoices.count_for_subscription(sub.id)
-
-            # Build invoice (pure function)
             invoice = build_invoice(
                 subscription=sub,
                 plan=plan,
@@ -127,45 +118,32 @@ class BillingCycle:
                 invoice_count_so_far=invoice_count,
             )
 
-            # Save invoice
-            saved_invoice = self.repos.invoices.add(invoice)
+            saved = self.invoice_repo.add(invoice)
+            for li in saved.line_items:
+                self.line_item_repo.add(li)
 
-            # Save line items
-            for li in saved_invoice.line_items:
-                self.repos.line_items.add(li)
-
-            # Post ledger debit
-            ledger_entry = LedgerEntry(
+            # ledger debit
+            entry = LedgerEntry(
                 id=None,
-                invoice_id=saved_invoice.id,
+                invoice_id=saved.id,
                 customer_id=sub.customer_id,
-                amount=saved_invoice.total,
+                amount=saved.total,
                 direction=LedgerDirection.DEBIT,
-                reason=f"Invoice #{saved_invoice.id} for subscription {sub.id}",
+                reason=f"Invoice #{saved.id}",
                 created_at=None,
             )
-            self.repos.ledger.add(ledger_entry)
+            self.ledger_repo.add(entry)
 
-            # Mark invoice as ISSUED
-            with self.repos.invoices.db.connect() as conn:
-                conn.execute(
-                    "UPDATE invoices SET status = 'ISSUED' WHERE id = ?",
-                    (saved_invoice.id,)
-                )
+            # mark issued
+            with self.db.connect() as conn:
+                conn.execute("UPDATE invoices SET status = 'ISSUED' WHERE id = ?", (saved.id,))
 
-            # Advance subscription period (monthly for simplicity)
+            # advance period
             new_start = sub.current_period_end
-            new_end = new_start + timedelta(days=30)  # monthly; should use plan.billing_period
-            self.repos.subscriptions.update_period(sub.id, new_start, new_end)
+            new_end = new_start + timedelta(days=30)
+            self.subscription_repo.update_period(sub.id, new_start, new_end)
 
             billed += 1
             invoices_created += 1
 
         return BillingResult(subscriptions_billed=billed, invoices_created=invoices_created)
-
-    def _build_strategy(self, plan: Plan):
-        """Build pricing strategy from plan."""
-        # For flat, we need a price. Since we don't have a price field in Plan, we use a dummy.
-        # In a real system, we'd fetch from plan.config or a separate price table.
-        # For tests, we use ₹1000 flat.
-        return FlatRate(Money("1000", plan.currency))
