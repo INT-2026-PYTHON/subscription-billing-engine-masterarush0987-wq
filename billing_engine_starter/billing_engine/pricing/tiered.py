@@ -1,3 +1,22 @@
+"""
+TieredPricing — different price per unit depending on the tier the quantity falls into.
+Cumulative (stacked) tier model.
+"""
+
+from dataclasses import dataclass
+from typing import Optional
+
+from billing_engine.money import Money
+from billing_engine.pricing.base import PricingStrategy   # <-- this was missing!
+
+
+@dataclass(frozen=True)
+class Tier:
+    from_units: int
+    to_units: Optional[int]   # None means "unlimited"
+    unit_price: Money
+
+
 class TieredPricing(PricingStrategy):
     def __init__(self, tiers: list[Tier]) -> None:
         if not tiers:
