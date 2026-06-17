@@ -5,6 +5,7 @@ Dunning — payment retry logic.
 from datetime import date, timedelta
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
 
 from billing_engine.payments.gateway import PaymentGateway
 from billing_engine.models import Invoice, LedgerDirection, LedgerEntry, InvoiceStatus, SubscriptionStatus
