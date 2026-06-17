@@ -17,7 +17,7 @@ class ProrationResult:
     charge: Money
     credit_tax: Money
     charge_tax: Money
-    total: Money  # net effect (charge - credit, can be negative)
+    total: Money  # net effect (charge - credit)
 
 
 def compute_proration(
@@ -31,7 +31,6 @@ def compute_proration(
 ) -> ProrationResult:
     """
     Compute prorated credit and charge when switching plans.
-
     The switch occurs on `switch_date`. The old plan is used up to that date,
     the new plan from that date onward.
     """
@@ -45,19 +44,18 @@ def compute_proration(
     if total_days <= 0:
         total_days = 1
 
-    days_used = (switch_date - period_start).days
     days_remaining = (period_end - switch_date).days
 
-    # Prorate charges
-    credit = old_plan_price * Decimal(days_remaining) / Decimal(total_days)
-    charge = new_plan_price * Decimal(days_remaining) / Decimal(total_days)
+    # Prorate charges using Decimal ratio
+    ratio = Decimal(days_remaining) / Decimal(total_days)
+    credit = old_plan_price * ratio
+    charge = new_plan_price * ratio
 
     # Apply tax to both legs
     tax_credit = tax_calc.apply(credit, tax_context).total
     tax_charge = tax_calc.apply(charge, tax_context).total
 
-    # Net total: charge - credit
-    net = charge - credit
+    net = charge - credit  # Money supports subtraction
 
     return ProrationResult(
         credit=credit,
