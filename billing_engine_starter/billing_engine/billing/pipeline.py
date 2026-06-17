@@ -38,5 +38,55 @@ def build_invoice(
     invoice_count_so_far: int,
 ) -> Invoice:
     """Pure function. Returns an Invoice (id=None, status=DRAFT) ready to be persisted."""
-    # TODO Day 2
-    raise NotImplementedError("Day 2: implement build_invoice")
+    # Input validation
+    if subscription.id is None:
+        raise ValueError("subscription must have an id")
+    if plan.currency != strategy.calculate(0).currency:
+        raise ValueError("Strategy currency does not match plan currency")
+
+    currency = plan.currency
+
+    # 1. Base charge
+    base = strategy.calculate(usage_quantity)
+    if base.currency != currency:
+        raise ValueError("Base amount currency mismatch")
+
+    # 2. Discount
+    if discount is not None:
+        ctx = DiscountContext(invoice_count_so_far=invoice_count_so_far)
+        discount_amount = discount.apply(base, ctx)
+        if discount_amount.currency != currency:
+            raise ValueError("Discount amount currency mismatch")
+    else:
+        discount_amount = Money(0, currency)
+
+    # 3. Taxable amount (base - discount, never negative)
+    taxable = base - discount_amount
+    if taxable.is_negative():
+        # Discount caps should prevent this, but safeguard
+        taxable = Money(0, currency)
+
+    # 4. Tax
+    tax_breakdown = tax_calc.apply(taxable, tax_context)
+    tax_total = tax_breakdown.total
+    if tax_total.currency != currency:
+        raise ValueError("Tax total currency mismatch")
+
+    # 5. Total
+    total = taxable + tax_total
+
+    # Build the Invoice dataclass (no id, status=DRAFT)
+    return Invoice(
+        id=None,
+        subscription_id=subscription.id,
+        period_start=period_start,
+        period_end=period_end,
+        currency=currency,
+        subtotal=base,
+        discount_total=discount_amount,
+        tax_total=tax_total,
+        total=total,
+        status=InvoiceStatus.DRAFT,
+        issued_at=None,
+        pdf_path=None,
+    )
