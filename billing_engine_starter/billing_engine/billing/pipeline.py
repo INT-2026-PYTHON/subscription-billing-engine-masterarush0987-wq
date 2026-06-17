@@ -2,13 +2,6 @@
 build_invoice — PURE function that turns inputs into an Invoice dataclass.
 
 ⚠️ NO database calls here. No `datetime.now()`. No PDF. Just math.
-
-The order is FIXED:
-    1. base       = strategy.calculate(usage)
-    2. discount   = discount.apply(base) if discount else 0
-    3. taxable    = base - discount
-    4. tax        = tax_calc.apply(taxable)
-    5. total      = taxable + tax.total
 """
 
 from __future__ import annotations
@@ -38,18 +31,12 @@ def build_invoice(
     invoice_count_so_far: int,
 ) -> Invoice:
     """Pure function. Returns an Invoice (id=None, status=DRAFT) ready to be persisted."""
-    # Input validation
     if subscription.id is None:
         raise ValueError("subscription must have an id")
-    if plan.currency != strategy.calculate(0).currency:
-        raise ValueError("Strategy currency does not match plan currency")
 
-    currency = plan.currency
-
-    # 1. Base charge
+    # 1. Base charge (strategy decides the currency)
     base = strategy.calculate(usage_quantity)
-    if base.currency != currency:
-        raise ValueError("Base amount currency mismatch")
+    currency = base.currency
 
     # 2. Discount
     if discount is not None:
@@ -60,7 +47,7 @@ def build_invoice(
     else:
         discount_amount = Money(0, currency)
 
-    # 3. Taxable amount (base - discount, never negative)
+    # 3. Taxable amount
     taxable = base - discount_amount
     if taxable.is_negative():
         taxable = Money(0, currency)
@@ -74,7 +61,39 @@ def build_invoice(
     # 5. Total
     total = taxable + tax_total
 
-    # Build the Invoice dataclass (no 'currency' argument – it's derived from Money objects)
+    # 6. Build line items
+    line_items = []
+
+    # BASE
+    line_items.append(InvoiceLineItem(
+        id=None,
+        invoice_id=None,
+        description=f"{plan.name} subscription",
+        amount=base,
+        kind=LineItemKind.BASE,
+    ))
+
+    # DISCOUNT (negative)
+    if discount_amount.amount > 0:
+        line_items.append(InvoiceLineItem(
+            id=None,
+            invoice_id=None,
+            description="Discount applied",
+            amount=Money(-discount_amount.amount, discount_amount.currency),
+            kind=LineItemKind.DISCOUNT,
+        ))
+
+    # TAX components
+    for label, tax_amount in tax_breakdown.components:
+        if tax_amount.amount > 0:
+            line_items.append(InvoiceLineItem(
+                id=None,
+                invoice_id=None,
+                description=label,
+                amount=tax_amount,
+                kind=LineItemKind.TAX,
+            ))
+
     return Invoice(
         id=None,
         subscription_id=subscription.id,
@@ -87,4 +106,5 @@ def build_invoice(
         status=InvoiceStatus.DRAFT,
         issued_at=None,
         pdf_path=None,
+        line_items=line_items,
     )
