@@ -1,41 +1,23 @@
 """
-Proration — Day 4 stretch.
-
-Mid-cycle plan change: customer is on Plan A from period_start to period_end,
-but on `switch_date` they upgrade (or downgrade) to Plan B.
-
-Day-count proration:
-    total_days     = (period_end - period_start).days
-    used_days      = (switch_date - period_start).days
-    remaining_days = total_days - used_days
-
-    credit = old_price * (remaining_days / total_days)
-    charge = new_price * (remaining_days / total_days)
-
-Tax MUST be recalculated on BOTH legs (reverse-tax on the credit,
-fresh tax on the new charge). Tax is NOT prorated linearly — the tax
-on a proration credit/charge is just `tax_calc.apply(credit_or_charge)`.
-
-The two legs are returned as TAX-INCLUSIVE Money values for the
-PRORATION_CREDIT (negative) and PRORATION_CHARGE (positive) line items.
+Proration — compute credits/charges when changing plans mid‑cycle.
 """
 
-from __future__ import annotations
-
-from dataclasses import dataclass
 from datetime import date
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Optional
 
 from billing_engine.money import Money
-from billing_engine.taxes.base import TaxCalculator, TaxContext
+from billing_engine.taxes.base import TaxCalculator, TaxContext, TaxBreakdown
 
 
-@dataclass(frozen=True)
+@dataclass
 class ProrationResult:
-    credit_amount: Money     # always returned as a POSITIVE Money; caller negates for line item
-    charge_amount: Money     # always positive
-    credit_tax: Money        # tax that was on the credit
-    charge_tax: Money        # tax that is on the new charge
+    credit: Money
+    charge: Money
+    credit_tax: Money
+    charge_tax: Money
+    total: Money  # net effect (charge - credit, can be negative)
 
 
 def compute_proration(
@@ -47,6 +29,40 @@ def compute_proration(
     tax_calc: TaxCalculator,
     tax_context: TaxContext,
 ) -> ProrationResult:
-    """Pure function. STRETCH — implement only after Days 1+2 are green."""
-    # TODO Day 4
-    raise NotImplementedError("Day 4: implement compute_proration")
+    """
+    Compute prorated credit and charge when switching plans.
+
+    The switch occurs on `switch_date`. The old plan is used up to that date,
+    the new plan from that date onward.
+    """
+    # Validate inputs
+    if not (period_start <= switch_date <= period_end):
+        raise ValueError("switch_date must be within the billing period")
+    if old_plan_price.currency != new_plan_price.currency:
+        raise ValueError("old and new plan prices must have the same currency")
+
+    total_days = (period_end - period_start).days
+    if total_days <= 0:
+        total_days = 1
+
+    days_used = (switch_date - period_start).days
+    days_remaining = (period_end - switch_date).days
+
+    # Prorate charges
+    credit = old_plan_price * Decimal(days_remaining) / Decimal(total_days)
+    charge = new_plan_price * Decimal(days_remaining) / Decimal(total_days)
+
+    # Apply tax to both legs
+    tax_credit = tax_calc.apply(credit, tax_context).total
+    tax_charge = tax_calc.apply(charge, tax_context).total
+
+    # Net total: charge - credit
+    net = charge - credit
+
+    return ProrationResult(
+        credit=credit,
+        charge=charge,
+        credit_tax=tax_credit,
+        charge_tax=tax_charge,
+        total=net,
+    )
