@@ -2,7 +2,7 @@
 Dunning — payment retry logic.
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -19,7 +19,7 @@ class DunningState(str, Enum):
     RETRYING = "RETRYING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
-    FAILED_FINAL = "FAILED_FINAL"   # added to match test expectation
+    FAILED_FINAL = "FAILED_FINAL"
 
 
 @dataclass
@@ -45,6 +45,10 @@ class DunningProcess:
         self.attempt_repo = attempt_repo
 
     def attempt(self, invoice: Invoice, customer_id: int, today: date) -> DunningOutcome:
+        # Ensure we have a date (not datetime)
+        if isinstance(today, datetime):
+            today = today.date()
+
         attempts = self.attempt_repo.count_for_invoice(invoice.id)
         attempt_no = attempts + 1
 
@@ -73,7 +77,7 @@ class DunningProcess:
                 self.subscription_repo.update_status(
                     invoice.subscription_id,
                     SubscriptionStatus.PAST_DUE,
-                    past_due_since=today,
+                    past_due_since=today,  # date, not datetime
                 )
                 return DunningOutcome(state=DunningState.FAILED_FINAL, attempt_no=attempt_no)
             else:
