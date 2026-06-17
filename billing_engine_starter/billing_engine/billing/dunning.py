@@ -19,11 +19,13 @@ class DunningState(str, Enum):
     RETRYING = "RETRYING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    FAILED_FINAL = "FAILED_FINAL"   # added to match test expectation
 
 
 @dataclass
 class DunningOutcome:
     state: DunningState
+    attempt_no: int = 0
     next_retry_at: Optional[date] = None
 
 
@@ -43,7 +45,6 @@ class DunningProcess:
         self.attempt_repo = attempt_repo
 
     def attempt(self, invoice: Invoice, customer_id: int, today: date) -> DunningOutcome:
-        """Attempt to charge the invoice. Returns an outcome with state."""
         attempts = self.attempt_repo.count_for_invoice(invoice.id)
         attempt_no = attempts + 1
 
@@ -62,7 +63,7 @@ class DunningProcess:
             )
             self.ledger_repo.add(entry)
             self.attempt_repo.add(invoice.id, attempt_no, "SUCCESS", None, None)
-            return DunningOutcome(state=DunningState.SUCCEEDED)
+            return DunningOutcome(state=DunningState.SUCCEEDED, attempt_no=attempt_no)
         else:
             next_retry = today + timedelta(days=RETRY_DELAYS_DAYS[min(attempt_no-1, len(RETRY_DELAYS_DAYS)-1)])
             self.attempt_repo.add(invoice.id, attempt_no, "FAILED", result.failure_reason, next_retry)
@@ -74,9 +75,9 @@ class DunningProcess:
                     SubscriptionStatus.PAST_DUE,
                     past_due_since=today,
                 )
-                return DunningOutcome(state=DunningState.FAILED)
+                return DunningOutcome(state=DunningState.FAILED_FINAL, attempt_no=attempt_no)
             else:
-                return DunningOutcome(state=DunningState.RETRYING, next_retry_at=next_retry)
+                return DunningOutcome(state=DunningState.RETRYING, attempt_no=attempt_no, next_retry_at=next_retry)
 
     @staticmethod
     def should_cancel(past_due_since: date, today: date, grace_days: int = 7) -> bool:
