@@ -4,7 +4,7 @@ BillingCycle — orchestrates billing for all due subscriptions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Optional, Callable
 
@@ -71,10 +71,12 @@ class BillingCycle:
         self.gateway = gateway or ScriptedGateway([])
 
     def run(self, as_of: date) -> BillingResult:
-        subs = self.subscription_repo.get_due_for_billing(as_of)
         result = BillingResult()
 
-        for sub in subs:
+        # Process all subscriptions: activate trials, bill due actives
+        all_subs = self.subscription_repo.list_all()
+
+        for sub in all_subs:
             # Handle trial expiration
             if sub.status == SubscriptionStatus.TRIAL and sub.trial_end and sub.trial_end <= as_of:
                 self.subscription_repo.update_status(sub.id, SubscriptionStatus.ACTIVE)
@@ -82,6 +84,10 @@ class BillingCycle:
                 result.trials_activated += 1
 
             if sub.status != SubscriptionStatus.ACTIVE:
+                continue
+
+            # Check if due for billing
+            if sub.current_period_end > as_of:
                 continue
 
             plan = self.plan_repo.get(sub.plan_id)
@@ -92,7 +98,7 @@ class BillingCycle:
             if not customer:
                 continue
 
-            # usage quantity (simplified)
+            # usage quantity
             usage_quantity = 0
             if plan.pricing_type.value in ("USAGE", "TIERED", "FREEMIUM"):
                 usage_quantity = self.usage_repo.sum_for_period(
@@ -101,16 +107,8 @@ class BillingCycle:
 
             strategy = self.strategy_factory(plan)
             discount = None  # simplify for now
-            tax_calc = self.tax_factory(customer)   # <-- pass customer here
-            tax_context = self.tax_factory(customer) # but we need context; we'll use a simple one
-
-            # Actually we need a TaxContext; we'll build one from customer.
-            from billing_engine.taxes.base import TaxContext
-            tax_context = TaxContext(
-                customer_country=customer.country_code,
-                customer_state=customer.state_code or "",
-                seller_state="MH",
-            )
+            # tax_factory returns (tax_calc, tax_context)
+            tax_calc, tax_context = self.tax_factory(customer)
 
             invoice_count = self.invoice_repo.count_for_subscription(sub.id)
 
