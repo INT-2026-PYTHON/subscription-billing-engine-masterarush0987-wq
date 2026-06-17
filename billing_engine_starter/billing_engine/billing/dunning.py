@@ -4,6 +4,14 @@ Dunning — payment retry logic.
 
 from datetime import date, timedelta
 from typing import Optional
+from enum import Enum
+
+
+class DunningState(str, Enum):
+    PENDING = "PENDING"
+    RETRY = "RETRY"
+    FAILED = "FAILED"
+    RECOVERED = "RECOVERED"
 
 
 class DunningProcess:
