@@ -18,16 +18,44 @@ from billing_engine.taxes.base import TaxCalculator, TaxContext, TaxBreakdown
 
 class GSTCalculator(TaxCalculator):
     def __init__(self, cgst: Decimal, sgst: Decimal, igst: Decimal) -> None:
-        # TODO Day 1
-        #   - Validate each rate is Decimal in [0, 1].
-        #   - Validate cgst + sgst == igst (sanity check on Indian GST setup).
-        #   - Store on self.
-        raise NotImplementedError("Day 1: implement GSTCalculator.__init__")
+        if not isinstance(cgst, Decimal):
+            raise TypeError("cgst must be Decimal")
+        if not isinstance(sgst, Decimal):
+            raise TypeError("sgst must be Decimal")
+        if not isinstance(igst, Decimal):
+            raise TypeError("igst must be Decimal")
+        if not (0 <= cgst <= 1):
+            raise ValueError("cgst must be between 0 and 1")
+        if not (0 <= sgst <= 1):
+            raise ValueError("sgst must be between 0 and 1")
+        if not (0 <= igst <= 1):
+            raise ValueError("igst must be between 0 and 1")
+        # Sanity check: cgst + sgst should equal igst (within tolerance)
+        if abs((cgst + sgst) - igst) > Decimal("0.0001"):
+            raise ValueError("cgst + sgst must equal igst")
+        self.cgst = cgst
+        self.sgst = sgst
+        self.igst = igst
 
     def apply(self, taxable: Money, context: TaxContext) -> TaxBreakdown:
-        # TODO Day 1
-        #   - Decide intra vs inter-state from context.
-        #     intra = bool(context.customer_state) and context.customer_state == context.seller_state
-        #   - If intra: components = [("CGST X%", taxable*cgst), ("SGST Y%", taxable*sgst)], total = sum
-        #   - Else:     components = [("IGST Z%", taxable*igst)],                            total = igst leg
-        raise NotImplementedError("Day 1: implement GSTCalculator.apply")
+        if not isinstance(taxable, Money):
+            raise TypeError("taxable must be Money")
+        if taxable.is_negative():
+            raise ValueError("taxable cannot be negative")
+        if not isinstance(context, TaxContext):
+            raise TypeError("context must be TaxContext")
+
+        # Determine intra vs inter
+        is_intra = (context.customer_state and context.customer_state == context.seller_state)
+
+        if is_intra:
+            cgst_amount = taxable * self.cgst
+            sgst_amount = taxable * self.sgst
+            components = [("CGST", cgst_amount), ("SGST", sgst_amount)]
+            total = cgst_amount + sgst_amount
+        else:
+            igst_amount = taxable * self.igst
+            components = [("IGST", igst_amount)]
+            total = igst_amount
+
+        return TaxBreakdown(components=components, total=total)
