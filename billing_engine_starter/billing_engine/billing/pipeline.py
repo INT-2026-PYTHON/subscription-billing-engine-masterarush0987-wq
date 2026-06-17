@@ -1,30 +1,3 @@
-"""
-build_invoice — PURE function that turns inputs into an Invoice dataclass.
-
-⚠️ NO database calls here. No `datetime.now()`. No PDF. Just math.
-
-The order is FIXED:
-    1. base       = strategy.calculate(usage)
-    2. discount   = discount.apply(base) if discount else 0
-    3. taxable    = base - discount
-    4. tax        = tax_calc.apply(taxable)
-    5. total      = taxable + tax.total
-"""
-
-from __future__ import annotations
-
-from datetime import date
-from typing import Optional
-
-from billing_engine.money import Money
-from billing_engine.models import (
-    Invoice, InvoiceStatus, InvoiceLineItem, LineItemKind, Subscription, Plan,
-)
-from billing_engine.pricing.base import PricingStrategy
-from billing_engine.discounts.base import Discount, DiscountContext
-from billing_engine.taxes.base import TaxCalculator, TaxContext
-
-
 def build_invoice(
     subscription: Subscription,
     plan: Plan,
@@ -63,7 +36,6 @@ def build_invoice(
     # 3. Taxable amount (base - discount, never negative)
     taxable = base - discount_amount
     if taxable.is_negative():
-        # Discount caps should prevent this, but safeguard
         taxable = Money(0, currency)
 
     # 4. Tax
@@ -75,13 +47,12 @@ def build_invoice(
     # 5. Total
     total = taxable + tax_total
 
-    # Build the Invoice dataclass (no id, status=DRAFT)
+    # Build the Invoice dataclass (no 'currency' argument – it's derived from Money objects)
     return Invoice(
         id=None,
         subscription_id=subscription.id,
         period_start=period_start,
         period_end=period_end,
-        currency=currency,
         subtotal=base,
         discount_total=discount_amount,
         tax_total=tax_total,
