@@ -1,9 +1,5 @@
 """
-PercentageDiscount — e.g., 20% off the subtotal.
-
-Examples:
-    PercentageDiscount(Decimal("0.20")).apply(Money(1000, "INR"), ctx)  ->  Money(200, "INR")
-    PercentageDiscount(Decimal("1.00")).apply(Money(500, "INR"), ctx)   ->  Money(500, "INR")  # 100% off
+PercentageDiscount — 20% off, etc. Capped at subtotal.
 """
 
 from decimal import Decimal
@@ -14,9 +10,21 @@ from billing_engine.discounts.base import Discount, DiscountContext
 
 class PercentageDiscount(Discount):
     def __init__(self, percentage: Decimal) -> None:
-        # TODO Day 1
-        raise NotImplementedError("Day 1: implement PercentageDiscount.__init__")
+        if not isinstance(percentage, Decimal):
+            raise TypeError("percentage must be Decimal")
+        if percentage < Decimal("0") or percentage > Decimal("1"):
+            raise ValueError("percentage must be between 0 and 1 (inclusive)")
+        self.percentage = percentage
 
     def apply(self, subtotal: Money, context: DiscountContext) -> Money:
-        # TODO Day 1
-        raise NotImplementedError("Day 1: implement PercentageDiscount.apply")
+        if not isinstance(subtotal, Money):
+            raise TypeError("subtotal must be Money")
+        if subtotal.is_negative():
+            raise ValueError("subtotal cannot be negative")
+        if not isinstance(context, DiscountContext):
+            raise TypeError("context must be DiscountContext")
+
+        discount = subtotal * self.percentage
+        if discount >= subtotal:
+            return subtotal
+        return discount
