@@ -7,6 +7,10 @@ from typing import Optional
 from enum import Enum
 
 
+# Retry delays in days: first retry after 1 day, second after 3 days, third after 7 days.
+RETRY_DELAYS_DAYS = [1, 3, 7]
+
+
 class DunningState(str, Enum):
     PENDING = "PENDING"
     RETRY = "RETRY"
