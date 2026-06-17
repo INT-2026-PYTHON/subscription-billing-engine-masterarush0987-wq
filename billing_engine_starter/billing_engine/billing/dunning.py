@@ -26,7 +26,7 @@ class DunningState(str, Enum):
 class DunningOutcome:
     state: DunningState
     attempt_no: int = 0
-    next_retry_at: Optional[date] = None
+    next_retry_at: Optional[datetime] = None   # now datetime, not date
 
 
 class DunningProcess:
@@ -45,9 +45,9 @@ class DunningProcess:
         self.attempt_repo = attempt_repo
 
     def attempt(self, invoice: Invoice, customer_id: int, today: date) -> DunningOutcome:
-        # Ensure we have a date (not datetime)
-        if isinstance(today, datetime):
-            today = today.date()
+        # Ensure today is a datetime for consistent comparisons
+        if isinstance(today, date) and not isinstance(today, datetime):
+            today = datetime.combine(today, datetime.min.time())
 
         attempts = self.attempt_repo.count_for_invoice(invoice.id)
         attempt_no = attempts + 1
@@ -74,10 +74,11 @@ class DunningProcess:
 
             if attempt_no >= MAX_ATTEMPTS:
                 self.invoice_repo.mark_failed(invoice.id)
+                # Pass the date part for past_due_since
                 self.subscription_repo.update_status(
                     invoice.subscription_id,
                     SubscriptionStatus.PAST_DUE,
-                    past_due_since=today,  # date, not datetime
+                    past_due_since=today.date(),
                 )
                 return DunningOutcome(state=DunningState.FAILED_FINAL, attempt_no=attempt_no)
             else:
