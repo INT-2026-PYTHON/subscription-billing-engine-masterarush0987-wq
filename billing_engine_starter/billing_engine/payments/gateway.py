@@ -5,6 +5,7 @@ Payment gateway abstractions.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
+import random
 
 
 @dataclass
@@ -30,3 +31,15 @@ class ScriptedGateway(PaymentGateway):
         result = self.results[self._idx]
         self._idx += 1
         return result
+
+
+class FakeRandomGateway(PaymentGateway):
+    """Fake gateway that randomly succeeds or fails (for testing)."""
+
+    def __init__(self, success_rate: float = 0.8) -> None:
+        self.success_rate = success_rate
+
+    def charge(self, invoice_id: int, amount_cents: int, currency: str) -> PaymentResult:
+        if random.random() < self.success_rate:
+            return PaymentResult(True)
+        return PaymentResult(False, "RANDOM_FAILURE")
